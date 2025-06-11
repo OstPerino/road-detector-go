@@ -1,18 +1,14 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
+	"path/filepath"
 
-	"road-detector-go/internal/client"
-	"road-detector-go/internal/config"
-	"road-detector-go/internal/geo"
+	"road-detector-go/internal/database"
 	"road-detector-go/internal/handler"
+	"road-detector-go/internal/repository"
 	"road-detector-go/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -20,127 +16,118 @@ import (
 )
 
 func main() {
-	// Загружаем конфигурацию
-	cfg := config.LoadConfig()
-
-	// Настраиваем логгер
-	logger := setupLogger(cfg.Logging.Level)
-	logger.Info("Запускаем сервис анализа дорожной разметки")
-
-	// Инициализируем компоненты
-	geoCalc := geo.NewCalculator()
-	
-	pythonClient := client.NewPythonAPIClient(
-		cfg.PythonAPI.BaseURL,
-		time.Duration(cfg.PythonAPI.Timeout)*time.Second,
-		logger,
-	)
-	
-	analyzerService := service.NewAnalyzerService(pythonClient, geoCalc, logger)
-	analyzerHandler := handler.NewAnalyzerHandler(analyzerService, logger)
-
-	// Настраиваем роутер
-	router := setupRouter(analyzerHandler, cfg.Logging.Level == "debug")
-
-	// Создаем HTTP сервер
-	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler: router,
-	}
-
-	// Запускаем сервер в отдельной горутине
-	go func() {
-		logger.Infof("Сервер запущен на порту %d", cfg.Server.Port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatalf("Ошибка запуска сервера: %v", err)
-		}
-	}()
-
-	// Ждем сигнал завершения
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	logger.Info("Получен сигнал завершения, останавливаем сервер...")
-
-	// Даем серверу 30 секунд на graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := server.Shutdown(ctx); err != nil {
-		logger.Errorf("Ошибка при остановке сервера: %v", err)
-	} else {
-		logger.Info("Сервер успешно остановлен")
-	}
-}
-
-// setupLogger настраивает логгер
-func setupLogger(level string) *logrus.Logger {
+	// Инициализируем логгер
 	logger := logrus.New()
-	
-	// Устанавливаем уровень логирования
-	switch level {
-	case "debug":
-		logger.SetLevel(logrus.DebugLevel)
-	case "info":
-		logger.SetLevel(logrus.InfoLevel)
-	case "warn":
-		logger.SetLevel(logrus.WarnLevel)
-	case "error":
-		logger.SetLevel(logrus.ErrorLevel)
-	default:
-		logger.SetLevel(logrus.InfoLevel)
+	logger.SetLevel(logrus.InfoLevel)
+	logger.SetFormatter(&logrus.JSONFormatter{})
+
+	logger.Info("Запуск Road Detector API Server")
+
+	// Получаем конфигурацию из переменных окружения
+	config := getConfig()
+
+	// Инициализируем базу данных
+	logger.Info("Подключение к базе данных...")
+	if err := database.Connect(); err != nil {
+		logger.Fatalf("Ошибка подключения к базе данных: %v", err)
 	}
 
-	// Устанавливаем формат JSON для продакшена
-	if level != "debug" {
-		logger.SetFormatter(&logrus.JSONFormatter{
-			TimestampFormat: time.RFC3339,
-		})
-	} else {
-		logger.SetFormatter(&logrus.TextFormatter{
-			FullTimestamp:   true,
-			TimestampFormat: "2006-01-02 15:04:05",
-		})
+	// Выполняем миграции
+	logger.Info("Выполнение миграций базы данных...")
+	if err := database.Migrate(); err != nil {
+		logger.Fatalf("Ошибка выполнения миграций: %v", err)
 	}
 
-	return logger
-}
+	// Проверяем здоровье базы данных
+	if err := database.HealthCheck(); err != nil {
+		logger.Fatalf("База данных недоступна: %v", err)
+	}
 
-// setupRouter настраивает маршруты
-func setupRouter(analyzerHandler *handler.AnalyzerHandler, debug bool) *gin.Engine {
-	// Устанавливаем режим Gin
-	if !debug {
+	logger.Info("База данных успешно подключена и готова к работе")
+
+	// Создаем папку для статических файлов
+	staticDir := filepath.Join(".", "static")
+	if err := os.MkdirAll(staticDir, 0755); err != nil {
+		logger.Fatalf("Ошибка создания папки для статических файлов: %v", err)
+	}
+
+	// Инициализируем репозитории
+	routeRepo := repository.NewRouteRepository(database.DB)
+
+	// Инициализируем сервисы
+	routeService := service.NewRouteService(routeRepo, logger, staticDir)
+	analyzerService := service.NewAnalyzerService(config.PythonServiceURL, logger, routeService)
+
+	// Инициализируем обработчики
+	routeHandler := handler.NewRouteHandler(analyzerService, routeService, logger)
+
+	// Настраиваем Gin router
+	if config.Environment == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
 	router := gin.New()
 
-	// Middleware
+	// Добавляем middleware
 	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
 	router.Use(corsMiddleware())
 
-	// API routes
-	api := router.Group("/api/v1")
-	{
-		api.POST("/analyze", analyzerHandler.AnalyzeRoadMarking)
-		api.GET("/health", analyzerHandler.HealthCheck)
+	// Обслуживание статических файлов
+	router.Static("/static", staticDir)
+
+	// Регистрируем маршруты
+	routeHandler.RegisterRoutes(router)
+
+	// Добавляем базовый маршрут для проверки
+	router.GET("/", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Road Detector API Server",
+			"version": "1.0.0",
+			"status":  "running",
+		})
+	})
+
+	// Запускаем сервер
+	serverAddr := fmt.Sprintf(":%s", config.Port)
+	logger.Infof("Сервер запущен на порту %s", config.Port)
+	logger.Infof("API доступно по адресу: http://localhost:%s/api/v1", config.Port)
+
+	if err := router.Run(serverAddr); err != nil {
+		logger.Fatalf("Ошибка запуска сервера: %v", err)
 	}
-
-	// Health check на корневом пути
-	router.GET("/health", analyzerHandler.HealthCheck)
-
-	return router
 }
 
-// corsMiddleware настраивает CORS
+// Config содержит конфигурацию приложения
+type Config struct {
+	Port             string
+	PythonServiceURL string
+	Environment      string
+}
+
+// getConfig получает конфигурацию из переменных окружения
+func getConfig() *Config {
+	return &Config{
+		Port:             getEnv("SERVER_PORT", "8080"),
+		PythonServiceURL: getEnv("PYTHON_API_BASE_URL", "http://localhost:8000"),
+		Environment:      getEnv("ENVIRONMENT", "development"),
+	}
+}
+
+// getEnv получает значение переменной окружения или возвращает значение по умолчанию
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// corsMiddleware добавляет заголовки CORS
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-Requested-With")
-		c.Header("Access-Control-Expose-Headers", "Content-Length")
 		c.Header("Access-Control-Allow-Credentials", "true")
 
 		if c.Request.Method == "OPTIONS" {
@@ -150,4 +137,4 @@ func corsMiddleware() gin.HandlerFunc {
 
 		c.Next()
 	}
-} 
+}
