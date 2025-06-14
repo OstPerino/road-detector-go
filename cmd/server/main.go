@@ -16,49 +16,40 @@ import (
 )
 
 func main() {
-	// Инициализируем логгер
 	logger := logrus.New()
 	logger.SetLevel(logrus.InfoLevel)
 	logger.SetFormatter(&logrus.JSONFormatter{})
 
 	logger.Info("Запуск Road Detector API Server")
 
-	// Получаем конфигурацию из переменных окружения
 	config := getConfig()
 
-	// Инициализируем базу данных
 	logger.Info("Подключение к базе данных...")
 	if err := database.Connect(); err != nil {
 		logger.Fatalf("Ошибка подключения к базе данных: %v", err)
 	}
 
-	// Выполняем миграции
 	logger.Info("Выполнение миграций базы данных...")
 	if err := database.Migrate(); err != nil {
 		logger.Fatalf("Ошибка выполнения миграций: %v", err)
 	}
 
-	// Проверяем здоровье базы данных
 	if err := database.HealthCheck(); err != nil {
 		logger.Fatalf("База данных недоступна: %v", err)
 	}
 
 	logger.Info("База данных успешно подключена и готова к работе")
 
-	// Создаем папку для статических файлов
 	staticDir := filepath.Join(".", "static")
 	if err := os.MkdirAll(staticDir, 0755); err != nil {
 		logger.Fatalf("Ошибка создания папки для статических файлов: %v", err)
 	}
 
-	// Инициализируем репозитории
 	routeRepo := repository.NewRouteRepository(database.DB)
 
-	// Инициализируем сервисы
 	routeService := service.NewRouteService(routeRepo, logger, staticDir)
 	analyzerService := service.NewAnalyzerService(config.PythonServiceURL, logger, routeService)
 
-	// Инициализируем обработчики
 	routeHandler := handler.NewRouteHandler(analyzerService, routeService, logger)
 
 	// Настраиваем Gin router
@@ -105,7 +96,6 @@ type Config struct {
 	Environment      string
 }
 
-// getConfig получает конфигурацию из переменных окружения
 func getConfig() *Config {
 	return &Config{
 		Port:             getEnv("SERVER_PORT", "8080"),
@@ -114,7 +104,6 @@ func getConfig() *Config {
 	}
 }
 
-// getEnv получает значение переменной окружения или возвращает значение по умолчанию
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -122,7 +111,6 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
-// corsMiddleware добавляет заголовки CORS
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")

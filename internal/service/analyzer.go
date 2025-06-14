@@ -343,7 +343,7 @@ func (s *AnalyzerService) processZipArchive(zipData []byte, startLat, startLon, 
 		endSegLon := startLon + (endLon-startLon)*endProgress
 
 		segments[i] = SegmentInfo{
-			SegmentID:          seg.SegmentID,
+			SegmentID:          i,
 			FramesCount:        seg.FramesCount,
 			CoveragePercentage: seg.CoveragePercentage,
 			HasData:            seg.HasData,

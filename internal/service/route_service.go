@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -32,10 +33,15 @@ func NewRouteService(routeRepo repository.RouteRepository, logger *logrus.Logger
 
 // SaveRoute сохраняет маршрут в базе данных
 func (s *RouteService) SaveRoute(routeID, videoFilename string, videoData io.Reader, analysisResult *AnalysisResult) error {
+	s.logger.Infof("Начинаем сохранение маршрута в БД. Размер видео: %d байт", videoData.(*bytes.Reader).Len())
 	s.logger.Infof("Сохраняем маршрут %s в базе данных", routeID)
+	s.logger.Infof("Детали анализа: сегментов=%d, среднее покрытие=%.2f%%, общее количество кадров=%d",
+		len(analysisResult.Segments),
+		analysisResult.OverallStats.AverageCoverage,
+		analysisResult.OverallStats.TotalFrames)
 
-	// Создаем уникальное имя файла для видео
-	videoPath := ""
+	// Сохраняем видео файл
+	var videoPath string
 	if videoData != nil && videoFilename != "" {
 		var err error
 		videoPath, err = s.saveVideoFile(routeID, videoFilename, videoData)
@@ -45,27 +51,30 @@ func (s *RouteService) SaveRoute(routeID, videoFilename string, videoData io.Rea
 		}
 	}
 
-	// Преобразуем результат анализа в модель базы данных
+	// Создаем объект маршрута
 	route := &model.Route{
 		ID:                  routeID,
-		Name:                fmt.Sprintf("Route %s", routeID[:8]),
+		Name:                fmt.Sprintf("Маршрут %s", routeID[:8]),
 		StartLat:            analysisResult.StartPoint.Lat,
 		StartLon:            analysisResult.StartPoint.Lon,
 		EndLat:              analysisResult.EndPoint.Lat,
 		EndLon:              analysisResult.EndPoint.Lon,
-		SegmentLengthM:      int32(analysisResult.SegmentLength),
+		TotalFrames:         analysisResult.OverallStats.TotalFrames,
+		TotalDistanceMeters: analysisResult.OverallStats.TotalDistanceMeters,
+		SegmentLengthM:      int(analysisResult.SegmentLength),
+		TotalSegments:       analysisResult.OverallStats.TotalSegments,
+		SegmentsWithData:    analysisResult.OverallStats.SegmentsWithData,
+		AverageCoverage:     analysisResult.OverallStats.AverageCoverage,
 		VideoFilename:       videoFilename,
 		VideoPath:           videoPath,
-		TotalFrames:         int32(analysisResult.OverallStats.TotalFrames),
-		TotalDistanceMeters: analysisResult.OverallStats.TotalDistanceMeters,
-		TotalSegments:       int32(analysisResult.OverallStats.TotalSegments),
-		SegmentsWithData:    int32(analysisResult.OverallStats.SegmentsWithData),
-		AverageCoverage:     analysisResult.OverallStats.AverageCoverage,
 		CreatedAt:           time.Now(),
 	}
 
 	// Преобразуем сегменты
-	for _, seg := range analysisResult.Segments {
+	for i, seg := range analysisResult.Segments {
+		s.logger.Infof("Создаем сегмент %d: ID=%d, кадров=%d, покрытие=%.2f%%, есть данные=%v",
+			i, seg.SegmentID, seg.FramesCount, seg.CoveragePercentage, seg.HasData)
+
 		segment := model.Segment{
 			RouteID:            routeID,
 			SegmentID:          int32(seg.SegmentID),
@@ -88,7 +97,7 @@ func (s *RouteService) SaveRoute(routeID, videoFilename string, videoData io.Rea
 		// Удаляем видео файл если что-то пошло не так
 		if videoPath != "" {
 			s.logger.Infof("Удаляем видео файл %s из-за ошибки сохранения в БД", videoPath)
-			// os.Remove(videoPath)
+			os.Remove(videoPath)
 		}
 		return fmt.Errorf("failed to save route to database: %w", err)
 	}
@@ -268,4 +277,23 @@ func (s *RouteService) modelToResponse(route *model.Route) *RouteResponse {
 // GenerateRouteID генерирует уникальный ID для маршрута
 func (s *RouteService) GenerateRouteID() string {
 	return uuid.New().String()
+}
+
+// UpdateRoute обновляет информацию о маршруте
+func (s *RouteService) UpdateRoute(route *model.Route) error {
+	return s.routeRepo.Update(route)
+}
+
+// GetRouteVideo возвращает путь к видео файлу маршрута
+func (s *RouteService) GetRouteVideo(routeID string) (string, error) {
+	route, err := s.routeRepo.GetByID(routeID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get route: %w", err)
+	}
+
+	if route.VideoPath == "" {
+		return "", fmt.Errorf("video not found for route %s", routeID)
+	}
+
+	return route.VideoPath, nil
 }

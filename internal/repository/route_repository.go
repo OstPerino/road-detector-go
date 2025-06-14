@@ -43,16 +43,22 @@ func (r *routeRepository) Create(route *model.Route) error {
 		return fmt.Errorf("failed to begin transaction: %w", tx.Error)
 	}
 
-	// Создаем маршрут
+	// Сначала создаем маршрут
 	if err := tx.Create(route).Error; err != nil {
 		tx.Rollback()
 		return fmt.Errorf("failed to create route: %w", err)
 	}
 
-	// Создаем сегменты
+	// Затем создаем сегменты
 	for i := range route.Segments {
+		// Логируем данные сегмента перед созданием
+		fmt.Printf("Создаем сегмент %d: RouteID=%s, SegmentID=%d, ID=%d\n",
+			i, route.Segments[i].RouteID, route.Segments[i].SegmentID, route.Segments[i].ID)
+
 		route.Segments[i].ID = 0 // Обнуляем ID для auto-increment
 		route.Segments[i].RouteID = route.ID
+		// Не обнуляем segment_id, он может быть любым
+
 		if err := tx.Create(&route.Segments[i]).Error; err != nil {
 			tx.Rollback()
 			return fmt.Errorf("failed to create segment %d: %w", i, err)

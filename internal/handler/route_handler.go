@@ -38,6 +38,7 @@ func (h *RouteHandler) RegisterRoutes(router *gin.Engine) {
 		api.DELETE("/routes/:id", h.DeleteRoute)
 		api.GET("/routes/area", h.GetRoutesByArea)
 		api.GET("/health", h.CheckHealth)
+		api.GET("/routes/:id/video", h.GetRouteVideo)
 	}
 }
 
@@ -300,4 +301,27 @@ func (h *RouteHandler) CheckHealth(c *gin.Context) {
 		"status":  "healthy",
 		"message": "Сервис работает нормально",
 	})
+}
+
+// GetRouteVideo возвращает видео для конкретного маршрута
+func (h *RouteHandler) GetRouteVideo(c *gin.Context) {
+	routeID := c.Param("id")
+	if routeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "route ID is required"})
+		return
+	}
+
+	route, err := h.routeService.GetRouteByID(routeID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "route not found"})
+		return
+	}
+
+	if route.VideoPath == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "video not found for this route"})
+		return
+	}
+
+	// Отправляем видео файл
+	c.File(route.VideoPath)
 }
